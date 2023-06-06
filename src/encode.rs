@@ -1,66 +1,7 @@
-use image::{ImageBuffer, RgbImage, Rgb};
+use image::{ImageBuffer, RgbImage, Pixel, ImageFormat};
 use reed_solomon::Encoder;
 
-use crate::consts::*;
-
-const PIXELS: usize = 37;
-const MODE: [u8; 4] = [0, 0, 1, 0];
-
-type Pixels = [[bool; PIXELS]; PIXELS];
-
-fn pad_left(bits: Vec<u8>, bit: u8, len: usize) -> Vec<u8> {
-    let mut out = vec![bit].repeat(len - bits.len());
-    out.extend_from_slice(bits.as_slice());
-    out
-}
-
-fn pad_right_mut(bits: &mut Vec<u8>, bit: u8, len: usize) {
-    bits.extend_from_slice(vec![bit].repeat(len - bits.len()).as_slice());
-}
-
-const MASKS: [u16; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768];
-
-fn u8_to_bits(inp: u8) -> [u8; 8] {
-    let mut out = [0; 8];
-    for i in 0..8 {
-        out[7-i] = (inp & MASKS[i] as u8) >> i
-    }
-
-    out
-}
-
-fn bits_to_u8(bits: &[u8; 8]) -> u8 {
-    let mut out = 0u8;
-    out |= bits[0];
-    for bit in &bits[1..8] {
-        out <<= 1;
-        out |= bit;
-    }
-
-    out
-}
-
-fn u16_to_bits(inp: u16) -> [u8; 16] {
-    let mut out = [0; 16];
-    for i in 0..16 {
-        out[15-i] = ((inp & MASKS[i]) >> i) as u8
-    }
-
-    out
-}
-
-fn pixel_row_to_str(row: [bool; PIXELS]) -> String {
-    let mut out = String::new();
-    for pixel in row {
-        if pixel {
-            out.push('1')
-        } else {
-            out.push('0')
-        }
-    }
-
-    out
-}
+use crate::utils::*;
 
 pub fn encode(data: String) -> Pixels {
     let mut modules = Vec::new();
@@ -113,30 +54,30 @@ pub fn encode(data: String) -> Pixels {
     let data = enc.encode(coeffs.as_slice());
 
     modules = Vec::new();
-    for coeff in &data[..] {
-        modules.extend_from_slice(&u8_to_bits(*coeff));
+    for &coeff in &data[..] {
+        modules.extend_from_slice(&u8_to_bits(coeff));
     }
 
     modules.extend_from_slice(&[0; 7]);
 
     let mut pixels = [[false; PIXELS]; PIXELS];
 
-    init_pixels(&mut pixels);
+    set_finder_patterns(&mut pixels);
 
-    for ((x, y), bit) in POS.iter().zip(modules.iter()) {
-        pixels[*y][*x] = if *bit == 1 { true } else { false }
+    for (&(x, y), &bit) in POS.iter().zip(modules.iter()) {
+        pixels[y][x] = if bit == 1 { true } else { false }
     }
 
     let mut masks = [[[true; PIXELS]; PIXELS]; 8];
 
-    masks[0] = apply_mask(pixels, |x, y| (x + y) % 2 == 0);
-    masks[1] = apply_mask(pixels, |_, y| y % 2 == 0);
-    masks[2] = apply_mask(pixels, |x, _| x % 3 == 0);
-    masks[3] = apply_mask(pixels, |x, y| (x + y) % 3 == 0);
-    masks[4] = apply_mask(pixels, |x, y| (y / 2 + x / 3) % 2 == 0);
-    masks[5] = apply_mask(pixels, |x, y| (((x * y) % 2) + ((x * y) % 3)) == 0);
-    masks[6] = apply_mask(pixels, |x, y| (((x * y) % 2) + ((x * y) % 3)) % 2 == 0);
-    masks[7] = apply_mask(pixels, |x, y| (((x + y) % 2) + ((x * y) % 3)) % 2 == 0);
+    masks[0] = set_mask(pixels, |x, y| (x + y) % 2 == 0);
+    masks[1] = set_mask(pixels, |_, y| y % 2 == 0);
+    masks[2] = set_mask(pixels, |x, _| x % 3 == 0);
+    masks[3] = set_mask(pixels, |x, y| (x + y) % 3 == 0);
+    masks[4] = set_mask(pixels, |x, y| (y / 2 + x / 3) % 2 == 0);
+    masks[5] = set_mask(pixels, |x, y| (((x * y) % 2) + ((x * y) % 3)) == 0);
+    masks[6] = set_mask(pixels, |x, y| (((x * y) % 2) + ((x * y) % 3)) % 2 == 0);
+    masks[7] = set_mask(pixels, |x, y| (((x + y) % 2) + ((x * y) % 3)) % 2 == 0);
 
     let mut penalties = [0usize; 8];
     for i in 0..8 {
@@ -147,12 +88,12 @@ pub fn encode(data: String) -> Pixels {
 
     pixels = masks[min_penalty_idx];
 
-    apply_format_bits(&mut pixels, min_penalty_idx);
+    set_format_bits(&mut pixels, min_penalty_idx);
 
     pixels
 }
 
-fn init_pixels(pixels: &mut Pixels) {
+fn set_finder_patterns(pixels: &mut Pixels) {
     for i in 0..7 {
         pixels[0][i] = true;
         pixels[0][PIXELS - 1 - i] = true;
@@ -196,7 +137,7 @@ fn init_pixels(pixels: &mut Pixels) {
     pixels[PIXELS - 7][PIXELS - 7] = true;
 }
 
-fn apply_mask<F>(pixels: Pixels, f: F) -> Pixels
+fn set_mask<F>(pixels: Pixels, f: F) -> Pixels
 where F: Fn(usize, usize) -> bool
 {
     let mut out = pixels;
@@ -209,15 +150,17 @@ where F: Fn(usize, usize) -> bool
     out
 }
 
-fn apply_format_bits(pixels: &mut Pixels, mask_id: usize) {
+fn set_format_bits(pixels: &mut Pixels, mask_id: usize) {
     let format_bits = MASK_FORMAT_STRINGS[mask_id];
 
-    for ((x, y), bit) in FORMAT_POS_1.iter().zip(format_bits.iter()) {
-        pixels[*y][*x] = if *bit == 1 { true } else { false }
-    }
-
-    for ((x, y), bit) in FORMAT_POS_2.iter().zip(format_bits.iter()) {
-        pixels[*y][*x] = if *bit == 1 { true } else { false }
+    for ((&(x1, y1), &(x2, y2)), &bit) in FORMAT_POS_1.iter().zip(FORMAT_POS_2.iter()).zip(format_bits.iter()) {
+        if bit == 1 {
+            pixels[y1][x1] = true;
+            pixels[y2][x2] = true;
+        } else {
+            pixels[y1][x1] = false;
+            pixels[y2][x2] = false;
+        }
     }
 }
 
@@ -233,12 +176,27 @@ fn rotate(pixels: Pixels) -> Pixels {
     out_pixels
 }
 
+#[derive(Debug)]
+struct Penalty {
+    horiz_run_penalty: usize,
+    vert_run_penalty: usize,
+    box_penalty: usize,
+    finder_penalty: usize,
+    dark_penalty: usize
+}
+
+impl Penalty {
+    fn finalize(self) -> usize {
+        self.box_penalty + self.dark_penalty + self.finder_penalty + self.horiz_run_penalty + self.vert_run_penalty
+    }
+}
+
 fn calc_penalty(pixels: Pixels) -> usize {
-    let mut penalty = 0;
+    let mut penalty = Penalty { horiz_run_penalty: 0, vert_run_penalty: 0, box_penalty: 0, finder_penalty: 0, dark_penalty: 0 };
 
     for row in pixels {
         let mut recent = row[0];
-        penalty += row.iter()
+        penalty.horiz_run_penalty += row.iter()
             .fold(vec![1usize], |acc, &bit| {
                 let mut ret = acc;
 
@@ -258,7 +216,7 @@ fn calc_penalty(pixels: Pixels) -> usize {
 
     for col in rotate(pixels) {
         let mut recent = col[0];
-        penalty += col.iter()
+        penalty.vert_run_penalty += col.iter()
             .fold(vec![1usize], |acc, &bit| {
                 let mut ret = acc;
 
@@ -279,22 +237,22 @@ fn calc_penalty(pixels: Pixels) -> usize {
     for x in 0..PIXELS-1 {
         for y in 0..PIXELS-1 {
             if pixels[y][x] == pixels[y][x+1] && pixels[y][x+1] == pixels[y+1][x] && pixels[y+1][x] == pixels[y+1][x+1] {
-                penalty += 3
+                penalty.box_penalty += 3
             }
         }
     }
 
     for row in pixels {
-        let row_str = pixel_row_to_str(row);
+        let row_str = pixel_array_to_str(row);
         if row_str.contains("10111010000") || row_str.contains("00001011101") {
-            penalty += 40
+            penalty.finder_penalty += 40
         }
     }
 
     for col in rotate(pixels) {
-        let col_str = pixel_row_to_str(col);
+        let col_str = pixel_array_to_str(col);
         if col_str.contains("10111010000") || col_str.contains("00001011101") {
-            penalty += 40
+            penalty.finder_penalty += 40
         }
     }
 
@@ -311,28 +269,23 @@ fn calc_penalty(pixels: Pixels) -> usize {
     let lower = (((percent / 5) * 5) - 50).abs();
     let upper = ((((percent / 5) + 1) * 5) - 50).abs();
 
-    penalty += (lower.min(upper) * 10) as usize;
+    penalty.dark_penalty += (lower.min(upper) * 10) as usize;
 
-    println!("penalty = {}", penalty);
-
-    penalty
+    penalty.finalize()
 }
 
-const BLACK: Rgb<u8> = Rgb([0, 0, 0]);
-const WHITE: Rgb<u8> = Rgb([255, 255, 255]);
-
 pub fn to_png(pixels: Pixels, file: String) {
-    let mut img: RgbImage = ImageBuffer::from_pixel(410, 410, WHITE);
+    let mut img: RgbImage = ImageBuffer::from_pixel(410, 410, WHITE.to_rgb());
 
     for (i, row) in pixels.iter().enumerate() {
         for (j, &bit) in row.iter().enumerate() {
             for x in 0..10 {
                 for y in 0..10 {
-                    img.put_pixel((20 + (j * 10) + x) as u32, (20 + (i * 10) + y) as u32, if bit { BLACK } else { WHITE })
+                    img.put_pixel((20 + (j * 10) + x) as u32, (20 + (i * 10) + y) as u32, (if bit { BLACK } else { WHITE }).to_rgb())
                 }
             }
         }
     }
 
-    img.save(file).unwrap();
+    img.save_with_format(file, ImageFormat::Png).unwrap();
 }
